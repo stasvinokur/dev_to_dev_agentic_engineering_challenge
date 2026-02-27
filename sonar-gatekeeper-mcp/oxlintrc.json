@@ -1,0 +1,8 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicolo-ribaudo/oxc-project/refs/heads/nicolo/oxlintrc-schema/oxlintrc.schema.json",
+  "rules": {
+    "no-unused-vars": "warn",
+    "no-console": "off"
+  },
+  "ignorePatterns": ["node_modules", "build", "dist"]
+}

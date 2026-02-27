@@ -1,0 +1,216 @@
+# Демо-сценарий SonarGatekeeper
+
+## Цель сценария
+
+Показать, как SonarGatekeeper помогает разработчику:
+- **найти** проблемный код в проекте,
+- **сгенерировать** минимальный фикс (unified diff),
+- **проверить**, что фикс ничего не сломал.
+
+В расширенном сценарии — показать полный AI-pipeline: от SonarQube issues до готового PR-описания.
+
+---
+
+## Сценарий 1: Базовый (~3 мин)
+
+Работа с кодом через `repo.*` tools. Не требует SonarQube — только Docker.
+
+### Предусловия
+
+```bash
+# Сборка образа (если ещё не собран)
+docker build -t sonar-gatekeeper .
+
+# Запуск MCP-сервера
+docker run -p 8000:8000 sonar-gatekeeper serve
+```
+
+- MCP URL: `http://localhost:8000/mcp`
+- Проверка: `curl http://localhost:8000/health` → `{"status":"ok",...}`
+
+Откройте MCP Inspector:
+
+```bash
+npx @modelcontextprotocol/inspector --transport streamablehttp --url http://localhost:8000/mcp
+```
+
+### Шаг 1. Посмотреть код файла с проблемами
+
+**Tool:** `repo.locate`
+
+**Аргументы:**
+```json
+{
+  "componentKey": "demo-project:src/utils.ts"
+}
+```
+
+**Что должно получиться:** исходный код файла `utils.ts` с номерами строк. Видны проблемы: функция `processData` с когнитивной сложностью 31 (лимит 15), неиспользуемые переменные, `for` вместо `for-of`.
+
+### Шаг 2. Сгенерировать фикс
+
+**Tool:** `repo.propose_patch`
+
+**Аргументы:**
+```json
+{
+  "filePath": "src/utils.ts",
+  "original": "  let temp = 0;\n  temp = data.length;",
+  "replacement": "  const dataLength = data.length;"
+}
+```
+
+**Что должно получиться:** unified diff, показывающий замену неиспользуемой переменной `temp` на осмысленную `dataLength`:
+
+```diff
+--- a/src/utils.ts
++++ b/src/utils.ts
+-  let temp = 0;
+-  temp = data.length;
++  const dataLength = data.length;
+```
+
+### Шаг 3. Проверить что фикс ничего не сломал
+
+**Tool:** `repo.run_checks`
+
+**Аргументы:**
+```json
+{}
+```
+
+**Что должно получиться:** результат запуска проверок (тесты, линтинг). Автоматически определяет доступные проверки в проекте.
+
+### Ожидаемый результат сценария 1
+
+- `repo.locate` — вернул исходный код с номерами строк
+- `repo.propose_patch` — сгенерировал корректный unified diff
+- `repo.run_checks` — запустил проверки, показал результат
+- **Продемонстрировано 3 tools**, каждый решает конкретную задачу
+
+---
+
+## Сценарий 2: Полный (~7 мин)
+
+Полный AI-pipeline: от SonarQube issues до PR-описания. Требует Docker Compose.
+
+### Предусловия
+
+```bash
+cd sonar-gatekeeper-mcp
+
+# Поднять инфраструктуру (SonarQube + Ollama + Langfuse)
+docker compose up -d
+
+# Дождаться готовности (~2-3 мин при первом запуске)
+# SonarQube: http://localhost:9000
+# Ollama:    http://localhost:11434
+
+# Настройка
+cp .env.example .env
+bun install
+```
+
+Сканирование `demo_project/`:
+
+```bash
+cd ..
+npx sonar-scanner \
+  -Dsonar.projectKey=demo-project \
+  -Dsonar.sources=demo_project/src \
+  -Dsonar.host.url=http://localhost:9000 \
+  -Dsonar.token=$(cat sonar-gatekeeper-mcp/sonar-token 2>/dev/null || echo "admin")
+```
+
+Откройте MCP Inspector:
+
+```bash
+cd sonar-gatekeeper-mcp
+npx @modelcontextprotocol/inspector bun run src/index.ts
+```
+
+### Шаг 1. Проверить quality gate
+
+**Tool:** `sonar.get_quality_gate_status`
+
+**Аргументы:**
+```json
+{
+  "projectKey": "demo-project"
+}
+```
+
+**Что должно получиться:** статус quality gate (OK/ERROR) и список условий.
+
+### Шаг 2. Найти issues
+
+**Tool:** `sonar.search_issues`
+
+**Аргументы:**
+```json
+{
+  "projectKey": "demo-project",
+  "resolved": false
+}
+```
+
+**Что должно получиться:** список из 15 открытых issues с severity (BLOCKER, CRITICAL, MAJOR, MINOR), файлами и описаниями.
+
+### Шаг 3. Понять правило
+
+**Tool:** `sonar.get_rule`
+
+**Аргументы:**
+```json
+{
+  "ruleKey": "typescript:S3776"
+}
+```
+
+**Что должно получиться:** описание правила "Cognitive Complexity of functions should not be too high", рекомендации по исправлению.
+
+### Шаг 4. Запустить полный pipeline
+
+**Tool:** `pipeline.run`
+
+**Аргументы:**
+```json
+{
+  "projectKey": "demo-project",
+  "projectRoot": "../demo_project"
+}
+```
+
+**Что должно получиться:** последовательная работа 5 агентов:
+
+```
+[сбор] готово: Quality Gate: OK, Всего открытых проблем: 15
+[триаж] готово: issues сгруппированы по приоритету
+[исправление] готово: Сгенерировано N патчей
+[верификация] готово / не пройдена → автоматический retry
+[отчёт] готово
+```
+
+Результат сохраняется в `demo_project/pipeline-report.md`.
+
+### Ожидаемый результат сценария 2
+
+- SonarQube нашёл **15 issues** (1 BLOCKER, 1 CRITICAL, 5 MAJOR, 8 MINOR)
+- Pipeline сгруппировал issues по корневой причине
+- Сгенерированы **патчи** (unified diff) для автоматически исправимых issues
+- При провале верификации — автоматический **retry с feedback**
+- Итоговый отчёт содержит: группы триажа, патчи, нерешённые проблемы, **готовое PR-описание**
+- **Продемонстрировано 7 tools** + AI-агентная связка
+
+---
+
+## Типичные проблемы / Troubleshooting
+
+| Проблема | Решение |
+|----------|---------|
+| `curl /health` не отвечает | Подождите 2-3 сек после `docker run`. Проверьте `docker ps` — контейнер должен быть Up. |
+| Smoke-тест FAILED | Запустите `docker logs <container_id>` для диагностики. |
+| SonarQube не стартует | Первый запуск занимает ~60 сек. Проверьте: `curl http://localhost:9000/api/system/status` |
+| Ollama не скачал модель | Проверьте: `docker logs sonar-gatekeeper-ollama-init`. Модель ~1 ГБ, нужен интернет. |
+| `pipeline.run` ошибка "no issues found" | Убедитесь, что `sonar-scanner` выполнен и issues видны на http://localhost:9000. |
+| Inspector не подключается | Проверьте URL: `http://localhost:8000/mcp` (HTTP, не HTTPS). Порт 8000 должен быть проброшен (`-p 8000:8000`). |

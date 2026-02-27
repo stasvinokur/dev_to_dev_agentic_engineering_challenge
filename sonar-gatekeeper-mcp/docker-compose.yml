@@ -1,0 +1,221 @@
+services:
+  # === MCP Server ===
+  mcp-server:
+    build: .
+    container_name: sonar-gatekeeper-mcp
+    depends_on:
+      sonarqube-init:
+        condition: service_completed_successfully
+    env_file: .env
+    stdin_open: true
+    volumes:
+      - sonar_shared:/shared
+
+  # === LLM: Ollama ===
+  ollama:
+    image: ollama/ollama:latest
+    container_name: sonar-gatekeeper-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  # Ollama model auto-pull (qwen2.5-coder:1.5b ~1GB)
+  ollama-init:
+    image: curlimages/curl:latest
+    container_name: sonar-gatekeeper-ollama-init
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "echo '[ollama-init] Pulling model qwen2.5-coder:1.5b...' &&
+             curl -sf http://ollama:11434/api/pull -d '{\"name\": \"qwen2.5-coder:1.5b\"}' &&
+             echo '[ollama-init] Model ready.'"
+
+  # === Code Analysis ===
+  sonarqube:
+    image: sonarqube:community
+    container_name: sonar-gatekeeper-sonarqube
+    ports:
+      - "9000:9000"
+    volumes:
+      - sonarqube_data:/opt/sonarqube/data
+      - sonarqube_extensions:/opt/sonarqube/extensions
+      - sonarqube_logs:/opt/sonarqube/logs
+    environment:
+      - sonar.web.javaOpts=-Xmx512m -Xms256m
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/api/system/status | grep -q UP"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  # === SonarQube Init (auto-provision token) ===
+  sonarqube-init:
+    image: curlimages/curl:latest
+    container_name: sonar-gatekeeper-init
+    user: "0:0"
+    depends_on:
+      sonarqube:
+        condition: service_healthy
+    volumes:
+      - ./docker/sonarqube-init.sh:/init.sh:ro
+      - sonar_shared:/shared
+    entrypoint: ["/bin/sh", "/init.sh"]
+
+  # === Observability: Langfuse v3 ===
+  langfuse-web:
+    image: langfuse/langfuse:3
+    container_name: sonar-gatekeeper-langfuse
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_started
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:clickhouse@langfuse-clickhouse:9000
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: 6379
+      REDIS_AUTH: ""
+      LANGFUSE_S3_EVENT_UPLOAD_ENABLED: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: us-east-1
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minioadmin
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: minioadmin
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      NEXTAUTH_SECRET: sonar-gatekeeper-secret
+      NEXTAUTH_URL: http://localhost:3000
+      SALT: sonar-gatekeeper-salt
+      TELEMETRY_ENABLED: "false"
+      LANGFUSE_INIT_ORG_ID: sonar-gatekeeper
+      LANGFUSE_INIT_ORG_NAME: SonarGatekeeper
+      LANGFUSE_INIT_PROJECT_ID: sonar-gatekeeper-project
+      LANGFUSE_INIT_PROJECT_NAME: SonarGatekeeper MCP
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: pk-lf-sonar-gatekeeper
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: sk-lf-sonar-gatekeeper
+      LANGFUSE_INIT_USER_EMAIL: admin@sonar-gatekeeper.local
+      LANGFUSE_INIT_USER_PASSWORD: admin1234
+      LANGFUSE_INIT_USER_NAME: Admin
+    restart: unless-stopped
+
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    container_name: sonar-gatekeeper-langfuse-worker
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:clickhouse@langfuse-clickhouse:9000
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: 6379
+      REDIS_AUTH: ""
+      LANGFUSE_S3_EVENT_UPLOAD_ENABLED: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: us-east-1
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minioadmin
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: minioadmin
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      TELEMETRY_ENABLED: "false"
+    restart: unless-stopped
+
+  langfuse-db:
+    image: postgres:16-alpine
+    container_name: sonar-gatekeeper-langfuse-db
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse
+      POSTGRES_DB: langfuse
+    volumes:
+      - langfuse_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server
+    container_name: sonar-gatekeeper-clickhouse
+    # No exposed ports — only accessible within Docker network
+    # (avoids conflict with SonarQube on host port 9000)
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+    volumes:
+      - langfuse_clickhouse_data:/var/lib/clickhouse
+      - langfuse_clickhouse_logs:/var/log/clickhouse-server
+      - ./docker/clickhouse/keeper.xml:/etc/clickhouse-server/config.d/keeper.xml:ro
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  langfuse-redis:
+    image: redis:7-alpine
+    container_name: sonar-gatekeeper-redis
+    volumes:
+      - langfuse_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  langfuse-minio:
+    image: minio/minio
+    container_name: sonar-gatekeeper-minio
+    entrypoint: >
+      /bin/sh -c "
+      minio server /data --console-address ':9001' &
+      sleep 2;
+      mc alias set local http://localhost:9000 minioadmin minioadmin;
+      mc mb --ignore-existing local/langfuse;
+      wait
+      "
+    ports:
+      - "9090:9001"  # MinIO console (API on internal 9000, no host conflict)
+    volumes:
+      - langfuse_minio_data:/data
+
+volumes:
+  ollama_data:
+  sonar_shared:
+  sonarqube_data:
+  sonarqube_extensions:
+  sonarqube_logs:
+  langfuse_postgres_data:
+  langfuse_clickhouse_data:
+  langfuse_clickhouse_logs:
+  langfuse_redis_data:
+  langfuse_minio_data:

@@ -32,23 +32,30 @@ const projectRoot = process.env["PROJECT_ROOT"] ?? "/demo_project";
 // Initialize Langfuse tracing (non-blocking, tolerates missing config)
 initLangfuse(config);
 
-// Session management: one MCP server, multiple transports (one per client session)
-const mcpServer = new McpServer({
-  name: "sonar-gatekeeper",
-  version: "1.0.0",
-});
+// Session management: one McpServer per client session (Protocol supports single transport)
+interface Session {
+  server: McpServer;
+  transport: WebStandardStreamableHTTPServerTransport;
+}
 
-registerAllTools(mcpServer, sonarClient, model, projectRoot);
+const sessions = new Map<string, Session>();
 
-const transports = new Map<string, WebStandardStreamableHTTPServerTransport>();
+function createMcpSession(): McpServer {
+  const server = new McpServer({
+    name: "sonar-gatekeeper",
+    version: "1.0.0",
+  });
+  registerAllTools(server, sonarClient, model, projectRoot);
+  return server;
+}
 
 async function handleMcpRequest(req: Request): Promise<Response> {
   const sessionId = req.headers.get("mcp-session-id");
 
   // Existing session
   if (sessionId) {
-    const transport = transports.get(sessionId);
-    if (!transport) {
+    const session = sessions.get(sessionId);
+    if (!session) {
       return new Response(
         JSON.stringify({
           jsonrpc: "2.0",
@@ -58,21 +65,22 @@ async function handleMcpRequest(req: Request): Promise<Response> {
         { status: 404, headers: { "Content-Type": "application/json" } },
       );
     }
-    return transport.handleRequest(req);
+    return session.transport.handleRequest(req);
   }
 
-  // New session (initialization)
+  // New session — each session gets its own McpServer + transport
+  const server = createMcpSession();
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: () => crypto.randomUUID(),
     onsessioninitialized: (id) => {
-      transports.set(id, transport);
+      sessions.set(id, { server, transport });
     },
     onsessionclosed: (id) => {
-      transports.delete(id);
+      sessions.delete(id);
     },
   });
 
-  await mcpServer.connect(transport);
+  await server.connect(transport);
   return transport.handleRequest(req);
 }
 
@@ -108,21 +116,20 @@ console.log(`[serve] Endpoints: /health, /mcp`);
 console.log(`[serve] Transport: Streamable HTTP (stateful sessions)`);
 
 // Graceful shutdown
-process.on("SIGINT", async () => {
-  console.log("\n[serve] Shutting down...");
-  for (const transport of transports.values()) {
-    await transport.close();
+async function shutdown() {
+  for (const session of sessions.values()) {
+    await session.transport.close();
   }
   await shutdownLangfuse();
   server.stop();
   process.exit(0);
+}
+
+process.on("SIGINT", async () => {
+  console.log("\n[serve] Shutting down...");
+  await shutdown();
 });
 
 process.on("SIGTERM", async () => {
-  for (const transport of transports.values()) {
-    await transport.close();
-  }
-  await shutdownLangfuse();
-  server.stop();
-  process.exit(0);
+  await shutdown();
 });

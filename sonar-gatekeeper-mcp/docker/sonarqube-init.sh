@@ -5,7 +5,7 @@ set -e
 
 SONAR_URL="${SONAR_URL:-http://sonarqube:9000}"
 SONAR_USER="${SONAR_USER:-admin}"
-SONAR_PASS="${SONAR_PASS:-admin}"
+SONAR_PASS="${SONAR_PASS:-SonarAdmin1!}"
 TOKEN_NAME="sonar-gatekeeper-auto"
 TOKEN_FILE="/shared/sonar-token"
 
@@ -20,6 +20,18 @@ for i in $(seq 1 30); do
   echo "[sonarqube-init] Attempt ${i}/30 — waiting 5s..."
   sleep 5
 done
+
+# Change default password if still "admin" (SonarQube forces this on first login)
+NEW_PASS="${SONAR_PASS:-SonarAdmin1!}"
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -u "admin:admin" \
+  -X POST "${SONAR_URL}/api/authentication/validate")
+if [ "${HTTP_CODE}" = "200" ]; then
+  # Default password still works — change it (even if old == new, SonarQube accepts this)
+  curl -sf -u "admin:admin" \
+    -X POST "${SONAR_URL}/api/users/change_password" \
+    -d "login=admin&previousPassword=admin&password=${NEW_PASS}" && \
+    echo "[sonarqube-init] Default password updated." || true
+fi
 
 # Revoke old token with same name (ignore errors if it doesn't exist)
 curl -sf -u "${SONAR_USER}:${SONAR_PASS}" \

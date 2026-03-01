@@ -105,10 +105,10 @@ Tool: repo.run_checks
 
   cd sonar-gatekeeper-mcp
 
-  # Поднять инфраструктуру (SonarQube + Ollama + Langfuse)
-  docker compose up -d
+  # Поднять инфраструктуру (ждёт пока основные сервисы станут healthy)
+  docker compose up -d --wait mcp-server langfuse-web langfuse-worker
 
-  # Дождаться готовности (~2-3 мин при первом запуске)
+  # После --wait все сервисы готовы:
   # SonarQube: http://localhost:9000
   # Ollama:    http://localhost:11434
 
@@ -116,14 +116,11 @@ Tool: repo.run_checks
   cp .env.example .env
   bun install
 
-Сканирование demo_project/:
+Сканирование demo_project/ выполняется автоматически при запуске Docker Compose
+(сервис sonar-scanner). Дождитесь завершения:
 
-  cd ..
-  npx sonar-scanner \
-    -Dsonar.projectKey=demo-project \
-    -Dsonar.sources=demo_project/src \
-    -Dsonar.host.url=http://localhost:9000 \
-    -Dsonar.token=$(cat sonar-gatekeeper-mcp/sonar-token 2>/dev/null || echo "admin")
+  docker logs -f sonar-gatekeeper-scanner
+  # Ожидаемый вывод в конце: "ANALYSIS SUCCESSFUL"
 
 Откройте MCP Inspector:
 

@@ -1,9 +1,14 @@
 FROM oven/bun:1 AS base
 WORKDIR /app
 
-COPY package.json bun.lock ./
+COPY sonar-gatekeeper-mcp/package.json sonar-gatekeeper-mcp/bun.lock ./
 RUN bun install --frozen-lockfile --production
 
-COPY src/ src/
+COPY sonar-gatekeeper-mcp/src/ src/
+COPY sonar-gatekeeper-mcp/entrypoint.sh ./
+RUN chmod +x entrypoint.sh
 
-ENTRYPOINT ["bun", "run", "src/index.ts"]
+COPY demo_project/ /demo_project/
+
+ENTRYPOINT ["./entrypoint.sh"]
+CMD ["serve"]

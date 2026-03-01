@@ -1,15 +1,27 @@
 services:
   # === MCP Server ===
   mcp-server:
-    build: .
+    build:
+      context: ..
+      dockerfile: sonar-gatekeeper-mcp/Dockerfile
     container_name: sonar-gatekeeper-mcp
     depends_on:
       sonarqube-init:
+        condition: service_completed_successfully
+      ollama-init:
+        condition: service_completed_successfully
+      sonar-scanner:
         condition: service_completed_successfully
     env_file: .env
     stdin_open: true
     volumes:
       - sonar_shared:/shared
+    healthcheck:
+      test: ["CMD-SHELL", "bun -e \"fetch('http://localhost:8000/health').then(r=>r.text()).then(t=>process.exit(t.includes('ok')?0:1)).catch(()=>process.exit(1))\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
 
   # === LLM: Ollama ===
   ollama:
@@ -70,6 +82,30 @@ services:
       - sonar_shared:/shared
     entrypoint: ["/bin/sh", "/init.sh"]
 
+  # === SonarQube Scanner (auto-scan demo_project) ===
+  sonar-scanner:
+    image: sonarsource/sonar-scanner-cli:latest
+    container_name: sonar-gatekeeper-scanner
+    depends_on:
+      sonarqube-init:
+        condition: service_completed_successfully
+    volumes:
+      - ../demo_project:/usr/src
+      - sonar_shared:/shared:ro
+    working_dir: /usr/src
+    environment:
+      SONAR_HOST_URL: http://sonarqube:9000
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        SONAR_TOKEN=$$(cat /shared/sonar-token)
+        exec sonar-scanner \
+          -Dsonar.token=$$SONAR_TOKEN \
+          -Dsonar.projectKey=demo-project \
+          -Dsonar.projectName="Demo Project with Issues" \
+          -Dsonar.sources=src
+
   # === Observability: Langfuse v3 ===
   langfuse-web:
     image: langfuse/langfuse:3
@@ -114,6 +150,12 @@ services:
       LANGFUSE_INIT_USER_EMAIL: admin@sonar-gatekeeper.local
       LANGFUSE_INIT_USER_PASSWORD: admin1234
       LANGFUSE_INIT_USER_NAME: Admin
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://$(hostname):3000/api/public/health | grep -q OK"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
     restart: unless-stopped
 
   langfuse-worker:
@@ -145,6 +187,12 @@ services:
       LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: minioadmin
       LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
       TELEMETRY_ENABLED: "false"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://$(hostname):3030/api/health | grep -q ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
     restart: unless-stopped
 
   langfuse-db:
@@ -207,6 +255,12 @@ services:
       - "9090:9001"  # MinIO console (API on internal 9000, no host conflict)
     volumes:
       - langfuse_minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local 2>/dev/null || curl -sf http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
 volumes:
   ollama_data:

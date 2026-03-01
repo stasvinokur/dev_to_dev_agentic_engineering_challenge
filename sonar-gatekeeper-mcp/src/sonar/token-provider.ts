@@ -28,19 +28,23 @@ export async function resolveToken(sonarUrl: string): Promise<string> {
     }
   }
 
-  // 3. Local cached file
+  // 3. Local cached file (validate before using)
   const pkgRoot = resolve(import.meta.dir, "../..");
   const localPath = resolve(pkgRoot, LOCAL_TOKEN_FILE);
   if (existsSync(localPath)) {
-    const token = readFileSync(localPath, "utf-8").trim();
-    if (token) {
-      console.log("[token] Используется кэшированный токен из sonar-token");
-      return token;
+    const cached = readFileSync(localPath, "utf-8").trim();
+    if (cached) {
+      const valid = await validateToken(sonarUrl, cached);
+      if (valid) {
+        console.log("[token] Используется кэшированный токен из sonar-token");
+        return cached;
+      }
+      console.log("[token] Кэшированный токен невалиден — перегенерация...");
     }
   }
 
   // 4. Auto-generate via API
-  console.log("[token] SONAR_TOKEN не задан — генерируем автоматически...");
+  console.log("[token] Генерируем токен автоматически...");
   const token = await generateToken(sonarUrl);
 
   // Cache locally for next runs
@@ -54,10 +58,24 @@ export async function resolveToken(sonarUrl: string): Promise<string> {
   return token;
 }
 
+async function validateToken(sonarUrl: string, token: string): Promise<boolean> {
+  try {
+    const baseUrl = sonarUrl.replace(/\/+$/, "");
+    const res = await fetch(`${baseUrl}/api/authentication/validate`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return false;
+    const data = (await res.json()) as { valid?: boolean };
+    return data.valid === true;
+  } catch {
+    return false;
+  }
+}
+
 async function generateToken(sonarUrl: string): Promise<string> {
   const baseUrl = sonarUrl.replace(/\/+$/, "");
   const user = process.env["SONAR_USER"] ?? "admin";
-  const pass = process.env["SONAR_PASS"] ?? "admin";
+  const pass = process.env["SONAR_PASS"] ?? "SonarAdmin1!";
   const auth = Buffer.from(`${user}:${pass}`).toString("base64");
 
   // Revoke existing token with same name (ignore errors)
